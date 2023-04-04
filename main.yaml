@@ -1,0 +1,98 @@
+---
+- name: Install and configure Designate on Rocky Linux
+  hosts: designate_servers
+  become: true
+  vars:
+    designate_db_password: "my_secure_password"
+    keystone_auth_uri: "http://{{ keystone_server }}/v3"
+    keystone_admin_user: "admin"
+    keystone_admin_password: "admin_password"
+    keystone_admin_project: "admin"
+    designate_service_name: "designate"
+    designate_endpoint_region: "RegionOne"
+    designate_endpoint_public_url: "http://{{ designate_public_host }}:9001/"
+    designate_endpoint_internal_url: "http://{{ designate_internal_host }}:9001/"
+    designate_endpoint_admin_url: "http://{{ designate_admin_host }}:9001/"
+  tasks:
+    - name: Install Designate packages
+      dnf:
+        name:
+          - openstack-designate
+          - python-designateclient
+        state: present
+
+    - name: Configure Designate
+      template:
+        src: "/etc/designate/{{ item }}.conf.j2"
+        dest: "/etc/designate/{{ item }}.conf"
+      with_items:
+        - api
+        - central
+        - mdns
+        - pool_manager
+        - producer
+        - sink
+
+    - name: Create Designate database
+      mysql_db:
+        name: designate
+        state: present
+        login_host: "{{ inventory_hostname }}"
+        login_user: root
+        login_password: "{{ mysql_root_password }}"
+      tags:
+        - designate_db
+
+    - name: Create Designate database user
+      mysql_user:
+        name: designate
+        password: "{{ designate_db_password }}"
+        priv: "designate.*:ALL"
+        login_host: "{{ inventory_hostname }}"
+        login_user: root
+        login_password: "{{ mysql_root_password }}"
+      tags:
+        - designate_db
+
+    - name: Run Designate database migrations
+      command: designate-manage database sync
+      tags:
+        - designate_db
+
+    - name: Register Designate service with Keystone
+      os_keystone_service:
+        name: "{{ designate_service_name }}"
+        type: dns
+        description: "OpenStack DNS Service"
+        state: present
+        auth:
+          auth_url: "{{ keystone_auth_uri }}"
+          username: "{{ keystone_admin_user }}"
+          password: "{{ keystone_admin_password }}"
+          project_name: "{{ keystone_admin_project }}"
+
+    - name: Create Designate endpoint in Keystone
+      os_keystone_endpoint:
+        service_name: "{{ designate_service_name }}"
+        region: "{{ designate_endpoint_region }}"
+        public_url: "{{ designate_endpoint_public_url }}"
+        internal_url: "{{ designate_endpoint_internal_url }}"
+        admin_url: "{{ designate_endpoint_admin_url }}"
+        state: present
+        auth:
+          auth_url: "{{ keystone_auth_uri }}"
+          username: "{{ keystone_admin_user }}"
+          password: "{{ keystone_admin_password }}"
+          project_name: "{{ keystone_admin_project }}"
+
+    - name: Start Designate services
+      systemd:
+        name: "{{ item }}"
+        state: started
+      with_items:
+        - openstack-designate-api
+        - openstack-designate-central
+        - openstack-designate-mdns
+        - openstack-designate-pool-manager
+        - openstack-designate-producer
+        - openstack-designate-sink
